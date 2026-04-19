@@ -1,15 +1,70 @@
+# Core app
 streamlit==1.44.1
+streamlit-feedback==0.1.4
+
+# LLM / RAG
 mistralai==0.4.2
-langchain==0.3.23
+langchain==0.2.16
+langchain-core==0.2.38
+langchain-community==0.2.16
 faiss-cpu==1.10.0
+
+# Database
+sqlalchemy==2.0.23
+sqlite3  # Built-in with Python
+
+# Data processing
+pandas==2.2.2
+numpy==1.26.4
+openpyxl==3.1.5
+
+# File parsing
 PyPDF2==3.0.1
 python-docx==1.1.2
-pandas==2.2.3
-openpyxl==3.1.5
+pymupdf==1.23.26
+pillow==10.3.0
+
+# OCR
+easyocr==1.7.1
+opencv-python-headless==4.8.1.78
+torch==2.2.2
+torchvision==0.17.2
+
+# Utils
 python-dotenv==1.1.0
 requests==2.32.3
-streamlit-feedback==0.1.4
-pymupdf>=1.22.0
-pillow>=9.0.0
-easyocr
-tqdm
+tqdm==4.66.4
+
+# Evaluation and Validation
+ragas==0.1.21
+#pydantic-ai==0.0.14
+logfire==0.15.0
+pydantic==2.10.6
+
+streamlit>=1.44.1
+mistralai>=1.12.4
+langchain>=1.2.10
+langchain-community>=0.4.1
+langchain-core>=1.2.17
+langchain-mistralai>=1.1.1
+langchain-text-splitters>=1.1.1
+langgraph>=1.0.10
+faiss-cpu>=1.10.0
+PyPDF2>=3.0.1
+python-docx>=1.1.2
+pandas>=2.2.3
+openpyxl>=3.1.5
+python-dotenv>=1.1.0
+requests>=2.32.3
+httpx>=0.28.1
+psycopg2-binary>=2.9.11
+pydantic>=2.12.5
+numpy>=2.4.2
+ragas>=0.4.3
+nest-asyncio>=1.6.0
+streamlit-feedback>=0.1.4
+pymupdf>=1.27.1
+pillow>=11.3.0
+easyocr>=1.7.2
+tqdm>=4.67.3
+logfire>=4.27.0

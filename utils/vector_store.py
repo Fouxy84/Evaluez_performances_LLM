@@ -4,11 +4,14 @@ import pickle
 import faiss
 import numpy as np
 import logging
-from typing import List, Dict, Tuple, Optional
+from typing import List, Dict, Tuple, Optional, Any
 from mistralai.client import MistralClient
 from mistralai.exceptions import MistralAPIException
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain_core.documents import Document # Utilisé pour le format attendu par le splitter
+
+# Pydantic for validation
+from pydantic import BaseModel, Field, validator
 
 from .config import (
     MISTRAL_API_KEY, EMBEDDING_MODEL, EMBEDDING_BATCH_SIZE,
@@ -16,6 +19,30 @@ from .config import (
 )
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+
+# Pydantic models for data validation
+class DocumentChunk(BaseModel):
+    """Modèle pour un chunk de document."""
+    id: str = Field(..., description="Identifiant unique du chunk")
+    text: str = Field(..., min_length=1, description="Contenu textuel du chunk")
+    metadata: Dict[str, Any] = Field(default_factory=dict, description="Métadonnées du chunk")
+
+    @validator('text')
+    def validate_text_not_empty(cls, v):
+        if not v.strip():
+            raise ValueError('Le texte du chunk ne peut pas être vide')
+        return v.strip()
+
+class EmbeddingData(BaseModel):
+    """Modèle pour les données d'embedding."""
+    chunk_id: str
+    embedding: List[float] = Field(..., min_items=1, description="Vecteur d'embedding")
+    text: str
+
+class DocumentInput(BaseModel):
+    """Modèle pour un document d'entrée."""
+    page_content: str = Field(..., min_length=1, description="Contenu du document")
+    metadata: Dict[str, Any] = Field(default_factory=dict, description="Métadonnées du document")
 
 class VectorStoreManager:
     """Gère la création, le chargement et la recherche dans un index Faiss."""
@@ -34,18 +61,34 @@ class VectorStoreManager:
                 self.index = faiss.read_index(FAISS_INDEX_FILE)
                 logging.info(f"Chargement des chunks depuis {DOCUMENT_CHUNKS_FILE}...")
                 with open(DOCUMENT_CHUNKS_FILE, 'rb') as f:
-                    self.document_chunks = pickle.load(f)
-                logging.info(f"Index ({self.index.ntotal} vecteurs) et {len(self.document_chunks)} chunks chargés.")
+                    self.document_chunks_dict = pickle.load(f)
+                # Revalider les chunks chargés
+                self.document_chunks = [DocumentChunk(**chunk) for chunk in self.document_chunks_dict]
+                logging.info(f"Index ({self.index.ntotal} vecteurs) et {len(self.document_chunks)} chunks chargés et validés.")
             except Exception as e:
                 logging.error(f"Erreur lors du chargement de l'index/chunks: {e}")
                 self.index = None
                 self.document_chunks = []
+                self.document_chunks_dict = []
         else:
             logging.warning("Fichiers d'index Faiss ou de chunks non trouvés. L'index est vide.")
+            self.document_chunks = []
+            self.document_chunks_dict = []
 
-    def _split_documents_to_chunks(self, documents: List[Dict[str, any]]) -> List[Dict[str, any]]:
-        """Découpe les documents en chunks avec métadonnées."""
+    def _split_documents_to_chunks(self, documents: List[Dict[str, any]]) -> List[DocumentChunk]:
+        """Découpe les documents en chunks avec métadonnées et validation Pydantic."""
         logging.info(f"Découpage de {len(documents)} documents en chunks (taille={CHUNK_SIZE}, chevauchement={CHUNK_OVERLAP})...")
+
+        # Valider les documents d'entrée
+        validated_documents = []
+        for doc in documents:
+            try:
+                validated_doc = DocumentInput(**doc)
+                validated_documents.append(validated_doc)
+            except Exception as e:
+                logging.error(f"Document invalide: {e}")
+                continue
+
         text_splitter = RecursiveCharacterTextSplitter(
             chunk_size=CHUNK_SIZE,
             chunk_overlap=CHUNK_OVERLAP,
@@ -55,31 +98,35 @@ class VectorStoreManager:
 
         all_chunks = []
         doc_counter = 0
-        for doc in documents:
+        for doc in validated_documents:
             # Convertit notre format de document en format Langchain Document pour le splitter
-            langchain_doc = Document(page_content=doc["page_content"], metadata=doc["metadata"])
+            langchain_doc = Document(page_content=doc.page_content, metadata=doc.metadata)
             chunks = text_splitter.split_documents([langchain_doc])
-            logging.info(f"  Document '{doc['metadata'].get('filename', 'N/A')}' découpé en {len(chunks)} chunks.")
+            logging.info(f"  Document '{doc.metadata.get('filename', 'N/A')}' découpé en {len(chunks)} chunks.")
 
-            # Enrichit chaque chunk avec des métadonnées supplémentaires
+            # Enrichit chaque chunk avec des métadonnées supplémentaires et valide
             for i, chunk in enumerate(chunks):
-                chunk_dict = {
-                    "id": f"{doc_counter}_{i}", # Identifiant unique du chunk (doc_index_chunk_index)
-                    "text": chunk.page_content,
-                    "metadata": {
-                        **chunk.metadata, # Métadonnées héritées du document (source, category, etc.)
-                        "chunk_id_in_doc": i, # Position du chunk dans son document d'origine
-                        "start_index": chunk.metadata.get("start_index", -1) # Position de début (en caractères)
-                    }
-                }
-                all_chunks.append(chunk_dict)
+                try:
+                    chunk_data = DocumentChunk(
+                        id=f"{doc_counter}_{i}", # Identifiant unique du chunk (doc_index_chunk_index)
+                        text=chunk.page_content,
+                        metadata={
+                            **chunk.metadata, # Métadonnées héritées du document (source, category, etc.)
+                            "chunk_id_in_doc": i, # Position du chunk dans son document d'origine
+                            "start_index": chunk.metadata.get("start_index", -1) # Position de début (en caractères)
+                        }
+                    )
+                    all_chunks.append(chunk_data)
+                except Exception as e:
+                    logging.error(f"Erreur de validation pour le chunk {i} du document {doc_counter}: {e}")
+                    continue
             doc_counter += 1
 
-        logging.info(f"Total de {len(all_chunks)} chunks créés.")
+        logging.info(f"Total de {len(all_chunks)} chunks validés et créés.")
         return all_chunks
 
-    def _generate_embeddings(self, chunks: List[Dict[str, any]]) -> Optional[np.ndarray]:
-        """Génère les embeddings pour une liste de chunks via l'API Mistral."""
+def _generate_embeddings(self, chunks: List[DocumentChunk]) -> Optional[np.ndarray]:
+        """Génère les embeddings pour une liste de chunks via l'API Mistral avec validation."""
         if not MISTRAL_API_KEY:
             logging.error("Impossible de générer les embeddings: MISTRAL_API_KEY manquante.")
             return None
@@ -94,7 +141,7 @@ class VectorStoreManager:
         for i in range(0, len(chunks), EMBEDDING_BATCH_SIZE):
             batch_num = (i // EMBEDDING_BATCH_SIZE) + 1
             batch_chunks = chunks[i:i + EMBEDDING_BATCH_SIZE]
-            texts_to_embed = [chunk["text"] for chunk in batch_chunks]
+            texts_to_embed = [chunk.text for chunk in batch_chunks]
 
             logging.info(f"  Traitement du lot {batch_num}/{total_batches} ({len(texts_to_embed)} chunks)")
             try:
@@ -103,6 +150,21 @@ class VectorStoreManager:
                     input=texts_to_embed
                 )
                 batch_embeddings = [data.embedding for data in response.data]
+
+                # Valider les embeddings
+                for j, (chunk, embedding) in enumerate(zip(batch_chunks, batch_embeddings)):
+                    try:
+                        embedding_data = EmbeddingData(
+                            chunk_id=chunk.id,
+                            embedding=embedding,
+                            text=chunk.text
+                        )
+                        # Ici on pourrait stocker ou traiter embedding_data si nécessaire
+                    except Exception as e:
+                        logging.error(f"Erreur de validation pour l'embedding du chunk {chunk.id}: {e}")
+                        # Utiliser un vecteur nul en cas d'erreur
+                        embedding = [0.0] * len(embedding) if embedding else [0.0] * 1024
+
                 all_embeddings.extend(batch_embeddings)
             except MistralAPIException as e:
                 logging.error(f"Erreur API Mistral lors de la génération d'embeddings (lot {batch_num}): {e}")
@@ -139,18 +201,24 @@ class VectorStoreManager:
         embeddings_array = np.array(all_embeddings).astype('float32')
         logging.info(f"Embeddings générés avec succès. Shape: {embeddings_array.shape}")
         return embeddings_array
+from langchain_mistralai.embeddings import MistralAIEmbeddings
+import numpy as np
 
-    def build_index(self, documents: List[Dict[str, any]]):
-        """Construit l'index Faiss à partir des documents."""
+
+def build_index(self, documents: List[Dict[str, any]]):
+        """Construit l'index Faiss à partir des documents avec validation Pydantic."""
         if not documents:
             logging.warning("Aucun document fourni pour construire l'index.")
             return
 
-        # 1. Découper en chunks
+        # 1. Découper en chunks avec validation
         self.document_chunks = self._split_documents_to_chunks(documents)
         if not self.document_chunks:
             logging.error("Le découpage n'a produit aucun chunk. Impossible de construire l'index.")
             return
+
+        # Convertir les DocumentChunk en dict pour la sauvegarde
+        self.document_chunks_dict = [chunk.dict() for chunk in self.document_chunks]
 
         # 2. Générer les embeddings
         embeddings = self._generate_embeddings(self.document_chunks)
@@ -158,6 +226,7 @@ class VectorStoreManager:
             logging.error("Problème de génération d'embeddings. Le nombre d'embeddings ne correspond pas au nombre de chunks.")
             # Nettoyer pour éviter un état incohérent
             self.document_chunks = []
+            self.document_chunks_dict = []
             self.index = None
             # Supprimer les fichiers potentiellement corrompus
             if os.path.exists(FAISS_INDEX_FILE): os.remove(FAISS_INDEX_FILE)
@@ -180,9 +249,9 @@ class VectorStoreManager:
         # 4. Sauvegarder l'index et les chunks
         self._save_index_and_chunks()
 
-    def _save_index_and_chunks(self):
+def _save_index_and_chunks(self):
         """Sauvegarde l'index Faiss et la liste des chunks."""
-        if self.index is None or not self.document_chunks:
+        if self.index is None or not hasattr(self, 'document_chunks_dict') or not self.document_chunks_dict:
             logging.warning("Tentative de sauvegarde d'un index ou de chunks vides.")
             return
 
@@ -194,12 +263,12 @@ class VectorStoreManager:
             faiss.write_index(self.index, FAISS_INDEX_FILE)
             logging.info(f"Sauvegarde des chunks dans {DOCUMENT_CHUNKS_FILE}...")
             with open(DOCUMENT_CHUNKS_FILE, 'wb') as f:
-                pickle.dump(self.document_chunks, f)
+                pickle.dump(self.document_chunks_dict, f)
             logging.info("Index et chunks sauvegardés avec succès.")
         except Exception as e:
             logging.error(f"Erreur lors de la sauvegarde de l'index/chunks: {e}")
 
-    def search(self, query_text: str, k: int = 5, min_score: float = None) -> List[Dict[str, any]]:
+def search(self, query_text: str, k: int = 5, min_score: float = None) -> List[Dict[str, any]]:
         """
         Recherche les k chunks les plus pertinents pour une requête.
 
@@ -259,7 +328,7 @@ class VectorStoreManager:
                         results.append({
                             "score": similarity, # Score de similarité en pourcentage
                             "raw_score": raw_score, # Score brut pour débogage
-                            "text": chunk["text"],
+                            "text": chunk.text,
                             "metadata": chunk["metadata"] # Contient source, category, chunk_id_in_doc, start_index etc.
                         })
                     else:

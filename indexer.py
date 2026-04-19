@@ -2,10 +2,25 @@
 import argparse
 import logging
 from typing import Optional
-
+import numpy as np
 from utils.config import INPUT_DIR # INPUT_DATA_URL (décommentez si besoin)
 from utils.data_loader import download_and_extract_zip, load_and_parse_files
-from utils.vector_store import VectorStoreManager
+from utils.vector_store import VectorStoreManager, build_index, _generate_embeddings
+from langchain_mistralai.embeddings import MistralAIEmbeddings
+
+vs = VectorStoreManager()
+
+embeddings = MistralAIEmbeddings(model="mistral-embed")
+docs = vs.document_chunks  # tes chunks
+texts = [doc.text for doc in docs]
+print(f"Nombre de documents: {len(texts)}")
+# 👉 embeddings cohérents
+vectors = _generate_embeddings(vs, docs)
+# 👉 rebuild FAISS
+vs.index.reset()
+vs.index.add(vectors)
+print("✅ Index FAISS reconstruit avec Mistral embeddings")
+print("Sample chunk:", texts[:2])
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
@@ -40,7 +55,7 @@ def run_indexing(input_directory: str, data_url: Optional[str] = None):
 
     logging.info("Construction de l'index Faiss (cela peut prendre du temps)...")
     # Cette méthode va splitter, générer les embeddings, créer l'index et sauvegarder
-    vector_store.build_index(documents)
+    build_index(vector_store, documents)
 
     logging.info("--- Processus d'indexation terminé avec succès ---")
     logging.info(f"Nombre de documents traités: {len(documents)}")
