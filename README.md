@@ -133,3 +133,103 @@ Vous pouvez personnaliser l'application en modifiant les paramètres dans `utils
 - Nombre de documents par défaut
 - Nom de la commune ou organisation
 
+---
+
+## Évaluation des performances (RAGAS)
+
+Le projet intègre un pipeline d'évaluation complet basé sur [RAGAS](https://docs.ragas.io/) permettant de mesurer la qualité du système RAG et de comparer les modes de réponse (RAG pur vs routage SQL enrichi).
+
+### Métriques évaluées
+
+| Métrique | Description |
+|---|---|
+| `faithfulness` | Fidélité de la réponse aux documents récupérés |
+| `answer_relevancy` | Pertinence de la réponse par rapport à la question |
+| `context_recall` | Couverture du contexte par rapport à la vérité terrain |
+| `context_precision` | Précision des documents récupérés |
+| `global_score` | Moyenne de faithfulness + answer_relevancy |
+
+### Prérequis — environnement dédié
+
+L'évaluation nécessite un environnement conda séparé (`ragas_env`) avec les dépendances RAGAS :
+
+```bash
+conda create -n ragas_env python=3.10 -y
+conda activate ragas_env
+pip install -r requirements.txt
+pip install ragas langchain-mistralai matplotlib
+```
+
+### Lancer une évaluation
+
+**Mode baseline (RAG pur)**
+```bash
+conda run -n ragas_env python evaluate_ragas.py --mode baseline
+```
+
+**Mode enriched (routage SQL activé)**
+```bash
+conda run -n ragas_env python evaluate_ragas.py --mode enriched
+```
+
+**Mode comparaison (baseline + enriched en séquence)**
+```bash
+conda run -n ragas_env python evaluate_ragas.py --mode compare
+```
+
+Chaque exécution produit dans `data/` :
+- `eval_results_<timestamp>.csv` — résultats détaillés par question (métriques, route, catégorie)
+- `eval_summary_<timestamp>.json` — moyennes globales et par catégorie
+
+### Générer le rapport comparatif
+
+Après avoir obtenu deux fichiers CSV (baseline et enriched), générer le rapport avec :
+
+```bash
+# En spécifiant explicitement les fichiers à comparer
+conda run -n ragas_env python generate_report.py \
+  --baseline data/eval_results_<timestamp_baseline>.csv \
+  --enriched data/eval_results_<timestamp_enriched>.csv
+
+# Ou sans arguments : sélection automatique des deux derniers fichiers CSV
+conda run -n ragas_env python generate_report.py
+```
+
+Le rapport est généré dans `data/report/` :
+
+| Fichier | Contenu |
+|---|---|
+| `01_global_comparison.png` | Barres groupées baseline vs enriched pour chaque métrique |
+| `02_score_by_category.png` | Heatmap des scores par catégorie de question |
+| `03_delta_per_metric.png` | Graphique waterfall des deltas par métrique |
+| `04_route_distribution.png` | Camembert de la distribution RAG / SQL |
+| `05_error_flag_by_category.png` | Taux d'erreur par catégorie |
+| `rapport_comparatif.txt` | Tableau synthétique + analyse critique des biais |
+
+### Catégories de cas de test
+
+Les 20 cas de test dans `evaluate_ragas.py` couvrent 6 catégories :
+
+| Catégorie | Description |
+|---|---|
+| `simple` | Questions directes à réponse unique |
+| `complex` | Questions multi-critères ou comparatives |
+| `ambiguous` | Questions subjectives ou mal définies |
+| `noisy` | Questions avec bruit lexical ou hors-sujet |
+| `robustness` | Questions de robustesse générale (données en temps réel) |
+| `robustness_mixed` | Combinaisons de critères textuels et numériques |
+
+### Résultats de référence
+
+Exécution du 22 avril 2026 (20 questions, modèle `mistral-small`) :
+
+| Métrique | Baseline (RAG) | Enriched (SQL) | Δ |
+|---|---|---|---|
+| Faithfulness | 0.3705 | 0.2778 | −25% |
+| Answer Relevancy | 0.5858 | 0.1023 | −83% |
+| Context Recall | 0.0000 | 0.0000 | — |
+| Context Precision | 0.0000 | 0.0000 | — |
+| **Score global** | **0.4782** | **0.1900** | **−60%** |
+
+> **Interprétation** : le routeur SQL (`_is_sql_question`) utilise des mots-clés trop génériques et envoie l'intégralité des questions en SQL. Le SQL tool retourne des données brutes sans prose narrative, ce qui effondre l'`answer_relevancy`. Les métriques de contexte sont nulles car aucun `TestCase` ne définit de `ground_truth`.
+

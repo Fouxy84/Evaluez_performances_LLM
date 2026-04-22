@@ -29,10 +29,19 @@ from pydantic import BaseModel, Field
 import faiss
 from ragas import evaluate
 from ragas.metrics import (
-    faithfulness,
-    answer_relevancy,
-    context_recall,
-    context_precision
+    faithfulness,        # Mesure si la réponse est factuellement ancrée dans les contextes récupérés.
+                         # Score = proportion d'affirmations de la réponse vérifiables dans le contexte.
+                         # Plage : [0, 1] — 1 = entièrement fidèle, 0 = aucune affirmation vérifiable.
+    answer_relevancy,    # Mesure si la réponse répond bien à la question posée.
+                         # Calculé en générant des questions synthétiques depuis la réponse et en mesurant
+                         # leur similarité cosinus avec la question originale.
+                         # Plage : [0, 1] — 1 = réponse parfaitement pertinente.
+    context_recall,      # Mesure la couverture du contexte récupéré par rapport à la vérité terrain (ground_truth).
+                         # Nécessite un ground_truth défini dans le TestCase, sinon retourne NaN/0.
+                         # Plage : [0, 1] — 1 = tous les éléments du ground_truth sont dans le contexte.
+    context_precision,   # Mesure la proportion de documents récupérés qui sont réellement utiles pour répondre.
+                         # Nécessite un ground_truth défini dans le TestCase, sinon retourne NaN/0.
+                         # Plage : [0, 1] — 1 = tous les chunks récupérés sont pertinents.
 )
 from ragas.llms import LangchainLLMWrapper
 from langchain_core.language_models.chat_models import BaseChatModel
@@ -161,15 +170,45 @@ class TestCase:
 
 
 TEST_CASES = [
+    # --- Simples ---
     TestCase("Quel joueur a le meilleur % à 3 points ?", "simple"),
+    TestCase("Qui a le plus grand nombre de rebonds cette saison ?", "simple"),
+    # --- Complexes ---
     TestCase("Compare Curry et Durant à 3 points sur les 5 derniers matchs", "complex"),
+    TestCase("Quel joueur combine le meilleur TS% et le plus haut nombre de passes décisives ?", "complex"),
+    # --- Ambiguës ---
     TestCase("Qui est le meilleur joueur ?", "ambiguous"),
+    TestCase("Quel est le joueur le plus utile à son équipe cette saison ?", "ambiguous"),
+    # --- Bruyantes ---
     TestCase("Quel joueur a le meilleur % avec stats mélangées et inutiles", "noisy"),
+    TestCase("Donne-moi des stats intéressantes sur n'importe quel joueur NBA", "noisy"),
+    # --- Robustesse générale ---
     TestCase("Combien de victoires ont les Warriors cette saison ?", "robustness"),
     TestCase("Compare Curry et Durant sur leurs moyennes de points et de passes", "robustness"),
     TestCase("Quel est le nombre de points moyen de LeBron James sur ses 5 derniers matchs ?", "robustness"),
     TestCase("Explique pourquoi les Lakers ont plus de victoires que les Suns cette saison.", "robustness"),
     TestCase("Quels sont les leaders en pourcentage à 3 points avec au moins 10 tentatives ?", "robustness"),
+    # --- Robustesse mixte texte + numérique ---
+    TestCase(
+        "Le joueur avec le meilleur PIE cette saison est-il aussi dans le top 5 des scoreurs ?",
+        "robustness_mixed",
+    ),
+    TestCase(
+        "Parmi les joueurs avec plus de 20 points par match, qui a le meilleur pourcentage aux lancers francs ?",
+        "robustness_mixed",
+    ),
+    TestCase(
+        "Quel joueur a une moyenne supérieure à 8 passes ET plus de 50% de réussite aux tirs ?",
+        "robustness_mixed",
+    ),
+    TestCase(
+        "Compare le Net Rating des équipes avec plus de 45 victoires cette saison.",
+        "robustness_mixed",
+    ),
+    TestCase(
+        "Quel joueur a progressé le plus en pourcentage de réussite à 3 points entre le début et la fin de saison ?",
+        "robustness_mixed",
+    ),
 ]
 
 
@@ -403,8 +442,35 @@ class RAGEvaluator:
         return df
 
     def build_summary(self, df: pd.DataFrame) -> str:
-        summary = df.mean(numeric_only=True).round(4)
-        return summary.to_string()
+        metric_cols = ["faithfulness", "answer_relevancy", "context_recall", "context_precision", "global_score"]
+        available = [c for c in metric_cols if c in df.columns]
+
+        lines = []
+
+        # Global means
+        lines.append("\n--- Moyennes globales ---")
+        global_means = df[available].mean().round(4)
+        for col, val in global_means.items():
+            lines.append(f"  {col:<25} {val:.4f}")
+
+        # Per-category breakdown
+        if "category" in df.columns:
+            lines.append("\n--- Scores par catégorie ---")
+            by_cat = df.groupby("category")[available].mean().round(4)
+            lines.append(by_cat.to_string())
+
+        # Error flag summary
+        if "error_flag" in df.columns:
+            n_errors = int(df["error_flag"].sum())
+            n_total = len(df)
+            lines.append(f"\n--- Signaux d'erreur : {n_errors}/{n_total} ({100*n_errors/n_total:.0f}%) ---")
+            if n_errors > 0:
+                error_rows = df[df["error_flag"] == True][["question", "faithfulness", "context_recall"]]
+                for _, row in error_rows.iterrows():
+                    lines.append(f"  ⚠  {row['question'][:60]}")
+                    lines.append(f"     faithfulness={row['faithfulness']:.3f}  context_recall={row['context_recall']:.3f}")
+
+        return "\n".join(lines)
 
 
 # ========================
@@ -441,17 +507,27 @@ def main():
             logger.error("Une des évaluations a échoué, impossible de comparer.")
             return
 
+        print("\n=== BASELINE GLOBAL SCORES ===")
+        print(evaluator.build_summary(baseline_df))
+
+        print("\n=== ENRICHED GLOBAL SCORES ===")
+        print(evaluator.build_summary(enriched_df))
+
         compare_df = evaluator.compare_runs(baseline_df, enriched_df)
         print("\n=== COMPARAISON BASELINE vs ENRICHED ===")
-        print(compare_df)
+        metric_cols = ["faithfulness", "answer_relevancy", "context_recall", "context_precision", "global_score"]
+        available = [c for c in metric_cols if c in compare_df.index]
+        print(compare_df.loc[available].to_string())
 
-        route_counts = enriched_df["route"].value_counts().to_dict()
+        route_counts = enriched_df["route"].value_counts()
         print("\n=== ROUTAGE DANS L'ENRICHED ===")
-        print(route_counts)
+        for route, count in route_counts.items():
+            pct = 100 * count / len(enriched_df)
+            print(f"  {route:<10} {count:>3} questions  ({pct:.0f}%)")
 
         categories = enriched_df.groupby(["category", "route"]).size().unstack(fill_value=0)
         print("\n=== DISTRIBUTION PAR CATEGORIE ET ROUTE ===")
-        print(categories)
+        print(categories.to_string())
 
 if __name__ == "__main__":
     main()
