@@ -188,6 +188,7 @@ TEST_CASES = [
     TestCase("Quel est le nombre de points moyen de LeBron James sur ses 5 derniers matchs ?", "robustness"),
     TestCase("Explique pourquoi les Lakers ont plus de victoires que les Suns cette saison.", "robustness"),
     TestCase("Quels sont les leaders en pourcentage à 3 points avec au moins 10 tentatives ?", "robustness"),
+     TestCase("combien de fois Tony Parker a t-il été MVP durant toute sa carrière en NBA ?", "robustness"),
     # --- Robustesse mixte texte + numérique ---
     TestCase(
         "Le joueur avec le meilleur PIE cette saison est-il aussi dans le top 5 des scoreurs ?",
